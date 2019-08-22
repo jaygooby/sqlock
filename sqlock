@@ -30,7 +30,7 @@ if [ -n "$MYSQL_PASSWORD" ]; then
   MYSQL_CREDENTIALS="$MYSQL_CREDENTIALS -p$MYSQL_PASSWORD"
 fi
 
-# echos caller line number and log message when $DEBUG is enabled
+# echo caller line number and log message when $DEBUG is enabled
 debug() {
   log="$1"
   file_and_line=$(caller)
@@ -46,18 +46,17 @@ tmpdir=$(mktemp -d) && {
   mkfifo "$fifo" && debug "Made fifo $fifo" || debug "Couldn't make fifo $fifo"
 } || debug "Couldn't mktemp"
 
-# Pipe the fifo to mysql, capture the output
-mysql $MYSQL_CREDENTIALS -N < "$fifo" > "$tmpdir"/sql.log &
+# tail the fifo to keep it open, pipe to mysql in unbuffered mode
+# and capture the output
+tail -f "$fifo" | mysql --unbuffered $MYSQL_CREDENTIALS -N > "$tmpdir"/sql.log &
 
 # Now try and get the lock
-echo "SELECT CONNECTION_ID();" >$fifo
 echo "SELECT IF(GET_LOCK('foo',$LOCKTIMEOUT_SECONDS)=1,'Got lock', concat('Already locked by connection: ', IS_USED_LOCK('foo')));" >$fifo
-echo "SELECT CONNECTION_ID();" >$fifo
 
 # Sleep for long enough to see whether we got the lock
 debug "Going to sleep to see if we got the lock"
 sleep $LOCKTIMEOUT_SECONDS
-grep -q "Got lock" "$tmpdir"/sql.log || (echo "Didn't get the lock" && rm -rf "$tmpdir" && exit 0)
+grep -q "Got lock" "$tmpdir"/sql.log || (echo "Didn't get the lock"; rm -rf "$tmpdir"; exit 1)
 debug "This is the contents of ${tmpdir}/sql.log:"
 debug "\t$(cat "${tmpdir}/sql.log")"
 
@@ -68,18 +67,10 @@ $@
 
 # release the lock
 debug "Tidying up. Release the lock"
-debug "Logging CONNECTION_ID"
-echo "SELECT CONNECTION_ID();" >$fifo
-debug "RELEASE_LOCK()"
 echo "SELECT RELEASE_LOCK('foo');" >$fifo
-debug "Logging CONNECTION_ID"
-echo "SELECT CONNECTION_ID();" >$fifo
-debug "Sleeping again before checking sql"
-sleep $LOCKTIMEOUT_SECONDS
 debug "This is the contents of ${tmpdir}/sql.log:"
 debug "\t$(cat "${tmpdir}/sql.log")"
 # remove the tmpdir with the fifo and log
 debug "Removing $tmpdir"
 rm -rf "$tmpdir"
 debug "exiting"
-exit 0
