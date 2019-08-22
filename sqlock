@@ -37,17 +37,17 @@ tmpdir=$(mktemp -d) && {
 
 # tail the fifo to keep it open, pipe to mysql in unbuffered mode
 # and capture the output
+# set -m; trap 'kill $(jobs -p)' EXIT; tail -f "$fifo" | mysql --unbuffered $MYSQL_CREDENTIALS -N > "$tmpdir"/sql.log &
 tail -f "$fifo" | mysql --unbuffered $MYSQL_CREDENTIALS -N > "$tmpdir"/sql.log &
-
-# save the PID so we can kill it later
-mysqlpid=$!
+tailpid=$!
+echo "I'll try and kill $(jobs -p) when $tailpid is killed"
 
 # Now try and get the lock
 echo "SELECT IF(GET_LOCK('$lockstring',$LOCKTIMEOUT_SECONDS)=1,'Got lock', concat('Already locked by connection: ', IS_USED_LOCK('$lockstring')));" >$fifo
 
 # Sleep for long enough to see whether we got the lock
 sleep $LOCKTIMEOUT_SECONDS
-grep -q "Got lock" "$tmpdir"/sql.log || (>&2 echo "Didn't get the lock"; kill $mysqlpid; rm -rf "$tmpdir"; exit 1)
+grep -q "Got lock" "$tmpdir"/sql.log || (>&2 echo "Didn't get the lock"; { kill $tailpid && wait $tailpid; } 2>/dev/null; rm -rf "$tmpdir"; exit 1)
 
 # If we're still running, we got the lock, so now execute the commands
 # that were passed to us:
@@ -56,8 +56,8 @@ grep -q "Got lock" "$tmpdir"/sql.log || (>&2 echo "Didn't get the lock"; kill $m
 # release the lock
 echo "SELECT RELEASE_LOCK('$lockstring');" >$fifo
 
-# kill the mysql tail
-kill $mysqlpid;
+# kill backgrounded mysql tail (it's always going to job 1 for this shell)
+{ kill $tailpid && wait $tailpid; } 2>/dev/null
 
 # remove the tmpdir with the fifo and log
 rm -rf "$tmpdir"
