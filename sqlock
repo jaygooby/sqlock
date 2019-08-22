@@ -19,10 +19,6 @@ MYSQL_USER=root
 MYSQL_PASSWORD=
 MYSQL_HOST=127.0.0.1
 
-# Call sqlock with DEBUG=1 or set it to 1 below to enable
-# verbose logging (should only need for development)
-DEBUG="${DEBUG:-}"
-
 # Set up Mysql credentials. Will use -p$MYSQL_PASSWORD if you've
 # defined MYSQL_PASSWORD, otherwise will use a passwordless connection
 MYSQL_CREDENTIALS="-u $MYSQL_USER -h $MYSQL_HOST"
@@ -30,51 +26,38 @@ if [ -n "$MYSQL_PASSWORD" ]; then
   MYSQL_CREDENTIALS="$MYSQL_CREDENTIALS -p$MYSQL_PASSWORD"
 fi
 
-# echo caller line number and log message when $DEBUG is enabled
-debug() {
-  log="$1"
-  file_and_line=$(caller)
-  if [ -n "$DEBUG" ]; then
-    >&2 echo -e debug: $file_and_line $log
-  fi
-}
-
 # convert our arguments into a string we can use to get the lock with
 lockstring="${@//[^[:alpha:]]/_}"
-debug "lockstring is: '$lockstring'"
 
 # Make a fifo in a random temp folder
 tmpdir=$(mktemp -d) && {
-  debug "Made tmpdir $tmpdir"
   fifo="$tmpdir/fifo"
-  mkfifo "$fifo" && debug "Made fifo $fifo" || debug "Couldn't make fifo $fifo"
-} || debug "Couldn't mktemp"
+  mkfifo "$fifo"
+}
 
 # tail the fifo to keep it open, pipe to mysql in unbuffered mode
 # and capture the output
 tail -f "$fifo" | mysql --unbuffered $MYSQL_CREDENTIALS -N > "$tmpdir"/sql.log &
 
+# save the PID so we can kill it later
+mysqlpid=$!
+
 # Now try and get the lock
 echo "SELECT IF(GET_LOCK('$lockstring',$LOCKTIMEOUT_SECONDS)=1,'Got lock', concat('Already locked by connection: ', IS_USED_LOCK('$lockstring')));" >$fifo
 
 # Sleep for long enough to see whether we got the lock
-debug "Going to sleep to see if we got the lock"
 sleep $LOCKTIMEOUT_SECONDS
-grep -q "Got lock" "$tmpdir"/sql.log || (echo "Didn't get the lock"; rm -rf "$tmpdir"; exit 1)
-debug "This is the contents of ${tmpdir}/sql.log:"
-debug "\t$(cat "${tmpdir}/sql.log")"
+grep -q "Got lock" "$tmpdir"/sql.log || (>&2 echo "Didn't get the lock"; kill $mysqlpid; rm -rf "$tmpdir"; exit 1)
 
 # If we're still running, we got the lock, so now execute the commands
 # that were passed to us:
-debug "Now we'll run the commands: $@"
 "$@"
 
 # release the lock
-debug "Tidying up. Release the lock"
 echo "SELECT RELEASE_LOCK('$lockstring');" >$fifo
-debug "This is the contents of ${tmpdir}/sql.log:"
-debug "\t$(cat "${tmpdir}/sql.log")"
+
+# kill the mysql tail
+kill $mysqlpid;
+
 # remove the tmpdir with the fifo and log
-debug "Removing $tmpdir"
 rm -rf "$tmpdir"
-debug "exiting"
