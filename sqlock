@@ -1,4 +1,10 @@
 #!/bin/bash
+#
+#
+# MIT License
+#
+# Copyright (c) 2019 Jay Caines-Gooby
+#
 # mutex for distributed tasks, ideally suited for cron tasks
 # that might otherwise run on duplicate servers in a cluster unnecessarily
 #
