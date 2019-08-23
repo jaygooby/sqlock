@@ -14,7 +14,8 @@ set -eu
 # Don't set to a negative value, as mysql will wait forever.
 LOCKTIMEOUT_SECONDS=1 # you can edit this
 
-# Mysql credentials - you can edit these
+# Mysql credentials - edit these with your details
+MYSQL_PATH=/usr/local/bin/mysql
 MYSQL_USER=root
 MYSQL_PASSWORD=
 MYSQL_HOST=127.0.0.1
@@ -26,8 +27,54 @@ if [ -n "$MYSQL_PASSWORD" ]; then
   MYSQL_CREDENTIALS="$MYSQL_CREDENTIALS -p$MYSQL_PASSWORD"
 fi
 
-# convert our arguments into a string we can use to get the lock with
+# Convert our arguments into a unique string we can use as the lock key
 lockstring="${@//[^[:alpha:]]/_}"
+
+command=${1:-}
+
+# Help text
+usage() {
+  cat <<-USAGE
+  sqlock command [args]
+
+  'command' is any command you wish to run, and 'args' is the optional arguments
+  for it.
+
+  For example:
+
+  sqlock echo hello world
+  sqlock bash -c "/usr/local/bin/foo; sleep 10; echo done"
+
+  The combination of your command and its arguments form a unique key which
+  means that sqlock is able to guarantee that only one instance of your command
+  and its args are run at the same time, either locally or across a network.
+USAGE
+}
+
+# Show help and exit
+usage_and_exit() {
+  usage >&2 && exit 1
+}
+
+# Kill the backgrounded tasks and then remove the temp folder that
+# holds the fifo and sql log
+tidyup() {
+  { kill ${children[@]}; wait ${children[@]}; } 2>/dev/null;
+  rm -rf "$tmpdir";
+}
+
+# Exit if we weren't passed a command to run
+if [ -z "$command" ]; then
+  usage_and_exit
+fi
+
+# Only -h and -? are valid options
+while getopts "h?" opt; do
+  case ${opt} in
+    h) usage_and_exit ;;
+    \?) usage_and_exit ;;
+  esac
+done
 
 # Make a fifo in a random temp folder
 tmpdir=$(mktemp -d) && {
@@ -35,30 +82,26 @@ tmpdir=$(mktemp -d) && {
   mkfifo "$fifo"
 }
 
-set -m # job control
-# tail the fifo to keep it open, pipe to mysql in unbuffered mode
+# Tail the fifo to keep it open, pipe to mysql in unbuffered mode
 # and capture the output
-tail -f "$fifo" | mysql --unbuffered $MYSQL_CREDENTIALS -N > "$tmpdir"/sql.log &
-
-echo "We need to kill $(jobs -p) before we exit"
+tail -f "$fifo" | $MYSQL_PATH --unbuffered $MYSQL_CREDENTIALS -N > "$tmpdir"/sql.log &
+children=( "$!" $(jobs -rp) )
+# So we don't get messages about the terminated background tasks later
+disown
 
 # Now try and get the lock
 echo "SELECT IF(GET_LOCK('$lockstring',$LOCKTIMEOUT_SECONDS)=1,'Got lock', concat('Already locked by connection: ', IS_USED_LOCK('$lockstring')));" >$fifo
 
-# Sleep for long enough to see whether we got the lock
-sleep $LOCKTIMEOUT_SECONDS
-grep -q "Got lock" "$tmpdir"/sql.log || (>&2 echo "Didn't get the lock"; kill $(jobs -p); rm -rf "$tmpdir"; exit 1)
+# Sleep for long enough to see whether we got the lock - we add 1 second
+# to the timeout, because the fifo output can still suffer from a slight delay
+sleep $(( $LOCKTIMEOUT_SECONDS + 1 ))
+grep -q "Got lock" "$tmpdir"/sql.log || (grep "Already locked" "$tmpdir"/sql.log >&2; tidyup; exit 1)
 
 # If we're still running, we got the lock, so now execute the commands
 # that were passed to us:
 "$@"
 
-sleep 3
 # release the lock
 echo "SELECT RELEASE_LOCK('$lockstring');" >$fifo
 
-# kill backgrounded mysql tail (it's always going to job 1 for this shell)
-kill $(jobs -p)
-
-# remove the tmpdir with the fifo and log
-rm -rf "$tmpdir"
+tidyup
