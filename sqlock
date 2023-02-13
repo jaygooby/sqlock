@@ -95,7 +95,7 @@ children=( "$!" $(jobs -rp) )
 disown
 
 # Now try and get the lock
-echo "SELECT IF(GET_LOCK('$lockstring',$LOCKTIMEOUT_SECONDS)=1,'Got lock', concat('Already locked by connection: ', IS_USED_LOCK('$lockstring')));" >$fifo
+echo "SELECT IF(GET_LOCK(sha1('$lockstring'),$LOCKTIMEOUT_SECONDS)=1,'Got lock', concat('Already locked by connection: ', IS_USED_LOCK('$lockstring')));" >$fifo
 
 # Sleep for long enough to see whether we got the lock - we add 1 second
 # to the timeout, because the fifo output can still suffer from a slight delay
@@ -107,6 +107,6 @@ grep -q "Got lock" "$tmpdir"/sql.log || (grep "Already locked" "$tmpdir"/sql.log
 "$@"
 
 # release the lock
-echo "SELECT RELEASE_LOCK('$lockstring');" >$fifo
+echo "SELECT RELEASE_LOCK(sha1('$lockstring'));" >$fifo
 
 tidyup
